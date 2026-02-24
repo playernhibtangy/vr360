@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Universal Pan & Zoom Player</title>
+
+<link href="https://vjs.zencdn.net/8.10.0/video-js.css" rel="stylesheet" />
+<link href="https://unpkg.com/videojs-vr/dist/videojs-vr.css" rel="stylesheet">
+
+<style>
+  body { font-family: Arial; margin: 0; background: #111; color: #fff; height: 100vh; overflow: hidden; }
+  
+  .container { display: flex; height: 100%; width: 100%; }
+  
+  /* LEFT SIDE: Player */
+  .player-section { 
+    flex: 3; 
+    padding: 20px; 
+    display: flex; 
+    flex-direction: column; 
+    background: #000;
+    position: relative;
+  }
+
+  /* Video Container: Needs overflow hidden so zoomed video doesn't spill out */
+  #video-container {
+    flex: 1; 
+    position: relative;
+    background: #000;
+    border-radius: 8px;
+    overflow: hidden; 
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    border: 1px solid #333;
+  }
+
+  /* Force Video.js to fill space */
+  .video-js {
+    width: 100% !important;
+    height: 100% !important; 
+  }
+
+  /* CONTROL PANEL GRID */
+  .controls-bar {
+    margin-top: 15px;
+    background: #222;
+    padding: 10px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .main-controls { display: flex; gap: 10px; }
+
+  /* PAD CONTROLLER (Directional Buttons) */
+  .pad-controller {
+    display: grid;
+    grid-template-columns: 40px 40px 40px;
+    grid-template-rows: 30px 30px;
+    gap: 4px;
+    background: #111;
+    padding: 5px;
+    border-radius: 8px;
+    border: 1px solid #444;
+  }
+
+  button { 
+    border: none; 
+    border-radius: 4px; 
+    background: #cc0000; 
+    color: #fff; 
+    cursor: pointer; 
+    font-weight: bold; 
+    font-size: 14px;
+    padding: 8px 12px;
+  }
+  button:hover { background: #ff0000; }
+  button:active { transform: scale(0.95); }
+
+  /* Specific Button Styles */
+  .pad-btn { background: #333; font-size: 18px; padding: 0; display: flex; justify-content: center; align-items: center; }
+  .pad-btn:hover { background: #555; }
+  
+  .zoom-btn { background: #0066cc; width: 40px; font-size: 18px; }
+  .zoom-btn:hover { background: #0088ff; }
+
+  #resetBtn { background: #555; font-size: 12px; }
+
+  /* RIGHT SIDE: Playlist */
+  .sidebar { 
+    flex: 1; 
+    background: #1f1f1f; 
+    overflow-y: auto; 
+    padding: 10px; 
+    border-left: 1px solid #333; 
+    min-width: 300px; 
+  }
+  
+  .video-item { 
+    display: flex; 
+    flex-direction: column; 
+    margin-bottom: 20px; 
+    cursor: pointer; 
+    padding: 10px; 
+    border-radius: 8px; 
+    background: #121212; 
+    border: 1px solid #333;
+  }
+  .video-item:hover { background: #2a2a2a; border-color: #666; }
+  .video-item.active { border: 2px solid #cc0000; background: #222; }
+  
+  .video-item video { width: 100%; height: 160px; object-fit: cover; border-radius: 6px; background: #000; pointer-events: none; }
+  .video-item span { display: block; margin-top: 8px; font-size: 14px; color: #eee; }
+</style>
+</head>
+<body>
+
+<div class="container">
+  
+  <div class="player-section">
+    <div id="video-container"></div>
+    
+    <div class="controls-bar">
+      
+      <div class="pad-controller">
+        <button class="pad-btn" id="zoomOutBtn" title="Zoom Out">➖</button>
+        <button class="pad-btn" id="btnUp" title="Up">⬆️</button>
+        <button class="pad-btn" id="zoomInBtn" title="Zoom In">➕</button>
+        
+        <button class="pad-btn" id="btnLeft" title="Left">⬅️</button>
+        <button class="pad-btn" id="btnDown" title="Down">⬇️</button>
+        <button class="pad-btn" id="btnRight" title="Right">➡️</button>
+      </div>
+
+      <div class="main-controls">
+        <button id="resetBtn">⟲ Reset View</button>
+        <button id="modeBtn" style="background:#444;">Switch Mode</button>
+        <button id="nextBtn">Next ▶</button>
+        <button id="loadBtn">📁 Load Folder</button>
+      </div>
+
+      <input type="file" id="folderPicker" webkitdirectory directory multiple accept="video/mp4" style="display:none;">
+    </div>
+  </div>
+
+  <div class="sidebar">
+    <div id="playlist"></div>
+  </div>
+
+</div>
+
+<script src="https://vjs.zencdn.net/8.10.0/video.min.js"></script>
+<script src="https://unpkg.com/videojs-vr/dist/videojs-vr.min.js"></script>
+
+<script>
+// --- Variables ---
+let player = null;
+let isVR = true; 
+let files = [];
+let currentIndex = 0;
+let currentUrl = null;
+
+// PAN & ZOOM STATE
+let state = {
+  scale: 1,
+  x: 0,
+  y: 0
+};
+const ZOOM_STEP = 0.2;
+const PAN_STEP = 50; // Pixels to move
+
+const playlistContainer = document.getElementById("playlist");
+const folderPicker = document.getElementById("folderPicker");
+const videoContainer = document.getElementById("video-container");
+const modeBtn = document.getElementById("modeBtn");
+
+// --- 1. TRANSFORM LOGIC (The Core Magic) ---
+function updateTransform() {
+  // We target the internal video element (works for both Standard and VR Canvas)
+  const techEl = document.querySelector('.vjs-tech'); 
+  if(techEl) {
+    techEl.style.transition = "transform 0.1s ease-out";
+    techEl.style.transform = `scale(${state.scale}) translate(${state.x}px, ${state.y}px)`;
+  }
+}
+
+// Button Event Listeners
+document.getElementById("zoomInBtn").onclick = () => { 
+  if(state.scale < 5) state.scale += ZOOM_STEP; 
+  updateTransform(); 
+};
+
+document.getElementById("zoomOutBtn").onclick = () => { 
+  if(state.scale > 1) state.scale -= ZOOM_STEP; 
+  else { state.scale = 1; state.x = 0; state.y = 0; } // Auto-reset if zoomed out fully
+  updateTransform(); 
+};
+
+document.getElementById("btnUp").onclick = () => { state.y += PAN_STEP; updateTransform(); };
+document.getElementById("btnDown").onclick = () => { state.y -= PAN_STEP; updateTransform(); };
+document.getElementById("btnLeft").onclick = () => { state.x += PAN_STEP; updateTransform(); };
+document.getElementById("btnRight").onclick = () => { state.x -= PAN_STEP; updateTransform(); };
+
+document.getElementById("resetBtn").onclick = () => {
+  state = { scale: 1, x: 0, y: 0 };
+  updateTransform();
+};
+
+
+// --- 2. Player Logic ---
+function initPlayer(url, time = 0) {
+  if (player) {
+    player.dispose();
+    player = null;
+  }
+
+  videoContainer.innerHTML = `
+    <video id="player" class="video-js vjs-default-skin vjs-big-play-centered" controls crossorigin="anonymous" playsinline></video>
+  `;
+
+  player = videojs('player');
+
+  if (isVR) {
+    player.vr({ projection: '360', motionControls: true });
+    modeBtn.innerText = "Mode: 360 VR";
+    modeBtn.style.background = "#0066cc";
+  } else {
+    modeBtn.innerText = "Mode: Normal";
+    modeBtn.style.background = "#444";
+  }
+
+  if (url) {
+    player.src({ src: url, type: 'video/mp4' });
+    player.currentTime(time);
+    player.play().catch(()=>{});
+  }
+
+  // RE-APPLY Transform when video loads
+  player.ready(() => {
+    setTimeout(updateTransform, 200);
+  });
+
+  player.on('ended', () => {
+    currentIndex = (currentIndex + 1) % files.length;
+    playVideo(currentIndex);
+  });
+}
+
+initPlayer(null); // Start empty
+
+// --- 3. Mode Switching ---
+modeBtn.addEventListener("click", () => {
+  isVR = !isVR; 
+  let t = player ? player.currentTime() : 0;
+  // Note: We intentionally KEEP the zoom state so you can switch modes while zoomed
+  initPlayer(currentUrl, t);
+});
+
+
+// --- 4. File Loading ---
+document.getElementById("loadBtn").onclick = () => folderPicker.click();
+
+folderPicker.onchange = (e) => {
+  files = Array.from(e.target.files).filter(f => f.type.startsWith('video/'));
+  if (files.length === 0) return alert("No video files found!");
+  loadSidebar();
+  playVideo(0);
+};
+
+function loadSidebar() {
+  playlistContainer.innerHTML = "";
+  files.forEach((file, i) => {
+    const item = document.createElement("div");
+    item.className = "video-item";
+    
+    // Preview
+    const v = document.createElement("video");
+    v.src = URL.createObjectURL(file);
+    v.muted = true; v.loop = true;
+    item.onmouseenter = () => v.play().catch(()=>{});
+    item.onmouseleave = () => { v.pause(); v.currentTime = 0; };
+    
+    const s = document.createElement("span");
+    s.textContent = (i+1) + ". " + file.name;
+    
+    item.appendChild(v); item.appendChild(s);
+    item.onclick = () => playVideo(i);
+    playlistContainer.appendChild(item);
+  });
+  highlightActive(0);
+}
+
+function playVideo(i) {
+  if (!files[i]) return;
+  currentIndex = i;
+  highlightActive(i);
+  const file = files[i];
+  currentUrl = URL.createObjectURL(file);
+  
+  if(player) {
+    player.src({ src: currentUrl, type: file.type });
+    player.play().catch(()=>{});
+    setTimeout(updateTransform, 100); // Ensure zoom stays applied
+  } else {
+    initPlayer(currentUrl);
+  }
+}
+
+function highlightActive(i) {
+  document.querySelectorAll(".video-item").forEach((el, idx) => el.classList.toggle("active", idx === i));
+}
+
+document.getElementById("nextBtn").onclick = () => {
+  if(files.length > 0) playVideo((currentIndex + 1) % files.length);
+};
+
+</script>
+</body>
+</html>
